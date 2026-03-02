@@ -262,12 +262,13 @@ svg { width: 100%; height: 100%; }
 <div id="app">
   <div id="sidebar">
     <div id="dataset-switcher">
-      <button class="ds-btn active" data-dataset="10kdiver">10K Diver</button>
-      <button class="ds-btn" data-dataset="moontower">Moontower</button>
+      <button class="ds-btn active" data-dataset="moontower">moontowermeta.com</button>
+      <button class="ds-btn" data-dataset="blog">blog.moontower.ai</button>
+      <button class="ds-btn" data-dataset="substack">moontower.substack.com</button>
     </div>
     <div id="sidebar-header">
-      <h1 id="dataset-title">10K Diver Mind Map</h1>
-      <p id="dataset-subtitle">90+ threads on finance, investing & mental models</p>
+      <h1 id="dataset-title">moontowermeta.com</h1>
+      <p id="dataset-subtitle">446 articles on options, volatility & decision-making</p>
     </div>
     <input class="search-box" id="search" placeholder="Search threads, concepts..." />
     <div class="tabs">
@@ -344,20 +345,26 @@ let activePath = null;
 let activeCluster = null;
 let searchTerm = "";
 let difficultyFilter = "all";
-let activeDataset = "10kdiver";
+let activeDataset = "moontower";
 
 const DATASETS = {
-  "10kdiver": {
-    file: "/.netlify/functions/data?dataset=10kdiver",
-    staticFile: "data/threads_enriched.json",
-    title: "10K Diver Mind Map",
-    subtitle: "90+ threads on finance, investing & mental models",
-  },
   "moontower": {
-    file: "/.netlify/functions/data?dataset=moontower",
+    file: "/api/data?dataset=moontower",
     staticFile: "data/moontower_enriched.json",
-    title: "Moontower Mind Map",
-    subtitle: "200+ articles on options, volatility & decision-making",
+    title: "moontowermeta.com",
+    subtitle: "446 articles on options, volatility & decision-making",
+  },
+  "blog": {
+    file: "/api/data?dataset=blog",
+    staticFile: "data/blog_enriched.json",
+    title: "blog.moontower.ai",
+    subtitle: "Blog posts on options analytics & volatility",
+  },
+  "substack": {
+    file: "/api/data?dataset=substack",
+    staticFile: "data/substack_enriched.json",
+    title: "moontower.substack.com",
+    subtitle: "Newsletter posts on options, volatility & decision-making",
   },
 };
 
@@ -810,34 +817,22 @@ async function sendChat(question) {
     `Thread: ${s.thread.title}\nSummary: ${s.thread.summary}\nConcepts: ${(s.thread.concepts || []).join(', ')}`
   ).join('\n\n');
 
-  // Fetch Gemini key from server (falls back to hardcoded for local dev)
-  let GEMINI_KEY;
   try {
-    const keyResp = await fetch("/.netlify/functions/gemini-key");
-    if (keyResp.ok) { GEMINI_KEY = (await keyResp.json()).key; }
-  } catch (_) {}
-  if (!GEMINI_KEY) {
-    messagesEl.innerHTML += `<div class="chat-msg assistant">Chat requires a GEMINI_API_KEY. Set it in your Netlify environment variables.</div>`;
-    messagesEl.scrollTop = messagesEl.scrollHeight;
-    return;
-  }
-  try {
-    const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`, {
+    const resp = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        contents: [{ parts: [{ text: `You are a helpful assistant that answers questions based on the ${DATASETS[activeDataset].title} content.
-
-Here are the most relevant items:
-${context}
-
-Question: ${question}
-
-Answer concisely, citing specific items when relevant.` }] }]
+        question,
+        context,
+        datasetTitle: DATASETS[activeDataset].title,
       })
     });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.error || "Chat request failed");
+    }
     const data = await resp.json();
-    const answer = data.candidates?.[0]?.content?.parts?.[0]?.text || "Error getting response.";
+    const answer = data.answer || "Error getting response.";
     // Format markdown: bold, italic, bullets
     let html = answer
       .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
@@ -1005,7 +1000,7 @@ async function refreshData() {
   btn.classList.add("loading");
   btn.querySelector(".spinner").style.display = "inline-block";
   try {
-    const resp = await fetch(`/.netlify/functions/refresh?dataset=${activeDataset}`, { method: "POST" });
+    const resp = await fetch(`/api/refresh?dataset=${activeDataset}`, { method: "POST" });
     const result = await resp.json();
     if (!resp.ok) throw new Error(result.error || "Refresh failed");
     if (result.newCount > 0) {

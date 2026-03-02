@@ -1,9 +1,0 @@
-[build]
-  publish = "."
-
-[functions]
-  directory = "netlify/functions"
-
-# Background function for refresh (allows up to 15 min)
-# Netlify automatically treats functions ending with "-background" as background functions
-# But we use synchronous + streaming approach instead
