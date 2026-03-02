@@ -264,6 +264,7 @@ svg { width: 100%; height: 100%; }
     <div id="dataset-switcher">
       <button class="ds-btn active" data-dataset="10kdiver">10K Diver</button>
       <button class="ds-btn" data-dataset="moontower">Moontower</button>
+      <button class="ds-btn" data-dataset="substack">Substack</button>
     </div>
     <div id="sidebar-header">
       <h1 id="dataset-title">10K Diver Mind Map</h1>
@@ -358,6 +359,12 @@ const DATASETS = {
     staticFile: "data/moontower_enriched.json",
     title: "Moontower Mind Map",
     subtitle: "200+ articles on options, volatility & decision-making",
+  },
+  "substack": {
+    file: "/.netlify/functions/data?dataset=substack",
+    staticFile: "data/substack_enriched.json",
+    title: "Moontower Substack",
+    subtitle: "Newsletter posts on options, volatility & decision-making",
   },
 };
 

@@ -4,7 +4,7 @@ import * as cheerio from "cheerio";
 import { readFile } from "fs/promises";
 import { join } from "path";
 
-const VALID_DATASETS = { moontower: "moontower_enriched", "10kdiver": "threads_enriched" };
+const VALID_DATASETS = { moontower: "moontower_enriched", "10kdiver": "threads_enriched", substack: "substack_enriched" };
 const MODEL_NAME = "gemini-2.5-flash";
 
 // ============================================================
@@ -207,6 +207,85 @@ async function scrapeMoontowerNew(existingUrls) {
 }
 
 // ============================================================
+// Substack scraping
+// ============================================================
+async function scrapeSubstackNew(existingIds) {
+  const SUBSTACK_DOMAIN = "moontower.substack.com";
+  const ARCHIVE_API = `https://${SUBSTACK_DOMAIN}/api/v1/archive`;
+  const PAGE_SIZE = 12;
+
+  // Paginate through the archive API
+  const allPosts = [];
+  let offset = 0;
+
+  while (true) {
+    try {
+      const url = `${ARCHIVE_API}?sort=new&limit=${PAGE_SIZE}&offset=${offset}`;
+      const resp = await fetch(url, { signal: AbortSignal.timeout(15000) });
+      if (!resp.ok) break;
+      const posts = await resp.json();
+      if (!posts || posts.length === 0) break;
+      allPosts.push(...posts);
+      offset += PAGE_SIZE;
+    } catch (e) {
+      console.log(`Error fetching Substack archive at offset ${offset}: ${e.message}`);
+      break;
+    }
+  }
+
+  console.log(`Substack: ${allPosts.length} total posts found`);
+
+  // Filter to new posts only
+  const newPosts = allPosts.filter((p) => !existingIds.has(`ss_${p.id}`));
+  console.log(`Substack: ${newPosts.length} new`);
+
+  const results = [];
+  for (const post of newPosts) {
+    try {
+      const postUrl = post.canonical_url || `https://${SUBSTACK_DOMAIN}/p/${post.slug}`;
+      let text = "";
+
+      // Substack API often includes body_html
+      if (post.body_html) {
+        const $ = cheerio.load(post.body_html);
+        $("script, style, nav, footer, header").remove();
+        text = $.root().text().trim();
+      } else {
+        // Fall back to scraping the post page
+        const pageHtml = await fetchPage(postUrl);
+        const $ = cheerio.load(pageHtml);
+        for (const selector of [".body", ".post-content", ".available-content", "article", "main"]) {
+          const el = $(selector).first();
+          if (el.length) {
+            el.find("script, style, nav, footer, header").remove();
+            text = el.text().trim();
+            break;
+          }
+        }
+        if (!text) {
+          const body = $("body");
+          body.find("script, style, nav, footer, header").remove();
+          text = body.text().trim();
+        }
+      }
+
+      results.push({
+        id: `ss_${post.id}`,
+        title: post.title || "Untitled",
+        subtitle: post.subtitle || "",
+        url: postUrl,
+        date: post.post_date || null,
+        category: post.type || "newsletter",
+        text: text || "",
+      });
+    } catch (e) {
+      console.log(`Error fetching Substack post ${post.id}: ${e.message}`);
+    }
+  }
+  return results;
+}
+
+// ============================================================
 // Gemini enrichment
 // ============================================================
 function getGenAI() {
@@ -401,6 +480,9 @@ export default async (req) => {
     if (dataset === "10kdiver") {
       const existingIds = new Set(existingThreads.map((t) => t.id));
       newRawItems = await scrape10kDiverNew(existingIds);
+    } else if (dataset === "substack") {
+      const existingIds = new Set(existingThreads.map((t) => t.id));
+      newRawItems = await scrapeSubstackNew(existingIds);
     } else {
       const existingUrls = new Set(existingThreads.map((t) => t.url));
       newRawItems = await scrapeMoontowerNew(existingUrls);
