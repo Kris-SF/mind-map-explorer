@@ -20,7 +20,10 @@ function stripFences(text) {
 }
 
 async function fetchPage(url) {
-  const resp = await fetch(url, { headers: { "User-Agent": "MindMapBot/1.0" }, signal: AbortSignal.timeout(15000) });
+  const resp = await fetch(url, {
+    headers: { "User-Agent": "Mozilla/5.0 (compatible; MindMapBot/1.0)" },
+    signal: AbortSignal.timeout(20000),
+  });
   if (!resp.ok) throw new Error(`HTTP ${resp.status} for ${url}`);
   return await resp.text();
 }
@@ -148,21 +151,39 @@ async function scrapeSubstackNew(existingIds) {
   let offset = 0;
 
   while (true) {
+    const url = `${ARCHIVE_API}?sort=new&limit=${PAGE_SIZE}&offset=${offset}`;
+    let resp;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        resp = await fetch(url, {
+          headers: { "User-Agent": "Mozilla/5.0 (compatible; MindMapBot/1.0)" },
+          signal: AbortSignal.timeout(20000),
+        });
+        if (resp.ok) break;
+        console.error(`Substack archive API returned HTTP ${resp.status} at offset ${offset} (attempt ${attempt + 1})`);
+        resp = null;
+      } catch (e) {
+        console.error(`Substack fetch error at offset ${offset} (attempt ${attempt + 1}): ${e.message}`);
+        resp = null;
+      }
+      if (attempt < 2) await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+    }
+    if (!resp || !resp.ok) break;
     try {
-      const url = `${ARCHIVE_API}?sort=new&limit=${PAGE_SIZE}&offset=${offset}`;
-      const resp = await fetch(url, { signal: AbortSignal.timeout(15000) });
-      if (!resp.ok) break;
       const posts = await resp.json();
       if (!posts || posts.length === 0) break;
       allPosts.push(...posts);
       offset += PAGE_SIZE;
     } catch (e) {
-      console.log(`Error fetching Substack archive at offset ${offset}: ${e.message}`);
+      console.error(`Substack JSON parse error at offset ${offset}: ${e.message}`);
       break;
     }
   }
 
   console.log(`Substack: ${allPosts.length} total posts found`);
+  if (allPosts.length === 0) {
+    throw new Error("Substack archive API returned no posts — the API may be blocked or down. Check Vercel function logs for details.");
+  }
 
   const newPosts = allPosts.filter((p) => !existingIds.has(`ss_${p.id}`));
   console.log(`Substack: ${newPosts.length} new`);
@@ -269,6 +290,9 @@ async function scrapeBlogNew(existingIds) {
   });
 
   console.log(`Blog: ${postUrls.length} total, ${newPostUrls.length} new`);
+  if (postUrls.length === 0) {
+    throw new Error("blog.moontower.ai sitemap returned no posts — the site may be down or the sitemap structure changed.");
+  }
 
   const results = [];
   for (const postUrl of newPostUrls) {
