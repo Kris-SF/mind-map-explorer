@@ -4,7 +4,7 @@ import * as cheerio from "cheerio";
 import { readFile } from "fs/promises";
 import { join } from "path";
 
-const VALID_DATASETS = { moontower: "moontower_enriched", "10kdiver": "threads_enriched", substack: "substack_enriched", blog: "blog_enriched" };
+const VALID_DATASETS = { moontower: "moontower_enriched", substack: "substack_enriched", blog: "blog_enriched" };
 const MODEL_NAME = "gemini-2.5-flash";
 
 // ============================================================
@@ -38,75 +38,6 @@ async function loadExistingData(blobKey) {
   const filePath = join(process.cwd(), "data", `${blobKey}.json`);
   const raw = await readFile(filePath, "utf-8");
   return JSON.parse(raw);
-}
-
-// ============================================================
-// 10K Diver scraping
-// ============================================================
-async function scrape10kDiverNew(existingIds) {
-  const html = await fetchPage("https://10kdiver.com/twitter-threads/");
-  const $ = cheerio.load(html);
-
-  const allThreads = [];
-  $('a[href*="twitter.com/10kdiver/status/"]').each((_, el) => {
-    const href = $(el).attr("href");
-    const title = $(el).text().trim();
-    const match = href.match(/\/status\/(\d+)/);
-    if (match && title) {
-      allThreads.push({ id: match[1], title, url: href });
-    }
-  });
-
-  // Deduplicate
-  const seen = new Set();
-  const unique = allThreads.filter((t) => {
-    if (seen.has(t.id)) return false;
-    seen.add(t.id);
-    return true;
-  });
-
-  // Find new ones
-  const newThreads = unique.filter((t) => !existingIds.has(t.id));
-  console.log(`10K Diver: ${unique.length} total, ${newThreads.length} new`);
-
-  // Fetch content for new threads
-  const results = [];
-  for (const thread of newThreads) {
-    try {
-      const mirrorUrl = `https://akhileshs-twitter.com/10kdiver/status/${thread.id}`;
-      const pageHtml = await fetchPage(mirrorUrl);
-      const $page = cheerio.load(pageHtml);
-
-      const tweets = [];
-      for (const selector of [".tweet-content", ".content", ".tweet-body", "[class*='tweet']"]) {
-        $page(selector).each((_, el) => {
-          const text = $page(el).text().trim();
-          if (text && text.length > 10) tweets.push(text);
-        });
-        if (tweets.length) break;
-      }
-
-      // Fallback
-      if (!tweets.length) {
-        $page("main p, body p, body div").each((_, el) => {
-          const text = $page(el).text().trim();
-          if (text && text.length > 20 && !text.toLowerCase().includes("cookie")) tweets.push(text);
-        });
-      }
-
-      results.push({
-        id: thread.id,
-        title: thread.title,
-        date: null,
-        url: thread.url,
-        mirror_url: mirrorUrl,
-        tweets,
-      });
-    } catch (e) {
-      console.log(`Error fetching thread ${thread.id}: ${e.message}`);
-    }
-  }
-  return results;
 }
 
 // ============================================================
@@ -401,28 +332,9 @@ function getGenAI() {
 }
 
 async function enrichSingleItem(model, item, datasetType) {
-  let content, prompt;
-
-  if (datasetType === "10kdiver") {
-    content = (item.tweets || []).slice(0, 50).join("\n---\n");
-    if (!content.trim()) content = `(No content. Title: ${item.title})`;
-    prompt = `Analyze this Twitter thread by @10kdiver about finance/investing.
-
-Title: ${item.title}
-
-Thread content:
-${content}
-
-Return JSON (no markdown fences):
-{
-  "summary": "2-3 sentence summary of the thread's key message",
-  "concepts": ["list", "of", "key", "concepts"],
-  "difficulty": "beginner|intermediate|advanced"
-}`;
-  } else {
-    content = (item.text || "").slice(0, 8000);
-    if (!content.trim()) content = `(No content. Title: ${item.title})`;
-    prompt = `Analyze this article by Kris Abdelmessih (Moontower) about finance, options, volatility, or decision-making.
+  let content = (item.text || "").slice(0, 8000);
+  if (!content.trim()) content = `(No content. Title: ${item.title})`;
+  const prompt = `Analyze this article by Kris Abdelmessih (Moontower) about finance, options, volatility, or decision-making.
 
 Title: ${item.title}
 Category: ${item.category || "Unknown"}
@@ -436,7 +348,6 @@ Return JSON (no markdown fences):
   "concepts": ["list", "of", "key", "concepts"],
   "difficulty": "beginner|intermediate|advanced"
 }`;
-  }
 
   const result = await model.generateContent(prompt);
   const text = stripFences(result.response.text());
@@ -451,15 +362,8 @@ async function generateConnections(model, allItems, datasetType) {
     )
     .join("\n\n");
 
-  const clusterGuidance =
-    datasetType === "10kdiver"
-      ? "compounding, valuation, probability/statistics, behavioral finance, portfolio theory, accounting/fundamentals, options/derivatives, general investing wisdom"
-      : "options pricing, volatility surface, probability/calibration, decision-making, career/life advice, market microstructure, risk management, behavioral finance";
-
-  const colors =
-    datasetType === "10kdiver"
-      ? "#4e79a7, #f28e2b, #e15759, #76b7b2, #59a14f, #edc948, #b07aa1, #ff9da7"
-      : "#4e79a7, #f28e2b, #e15759, #76b7b2, #59a14f, #edc948, #b07aa1, #ff9da7, #9c755f, #bab0ac";
+  const clusterGuidance = "options pricing, volatility surface, probability/calibration, decision-making, career/life advice, market microstructure, risk management, behavioral finance";
+  const colors = "#4e79a7, #f28e2b, #e15759, #76b7b2, #59a14f, #edc948, #b07aa1, #ff9da7, #9c755f, #bab0ac";
 
   const prompt = `You have ${allItems.length} finance/investing items.
 
@@ -499,7 +403,7 @@ async function generateQuizzes(model, items, edges, datasetType) {
   const quizzes = [];
   const batchSize = 10;
 
-  const topicLabel = datasetType === "10kdiver" ? "finance/investing threads by @10kdiver" : "articles about options, volatility, and decision-making by Kris Abdelmessih";
+  const topicLabel = "articles about options, volatility, and decision-making by Kris Abdelmessih";
 
   // Per-item quizzes in batches
   for (let i = 0; i < items.length; i += batchSize) {
@@ -569,7 +473,7 @@ export default async (req) => {
   }
 
   const url = new URL(req.url);
-  const dataset = url.searchParams.get("dataset") || "10kdiver";
+  const dataset = url.searchParams.get("dataset") || "moontower";
   if (!VALID_DATASETS[dataset]) {
     return new Response(JSON.stringify({ error: "Invalid dataset" }), { status: 400, headers: { "Content-Type": "application/json" } });
   }
@@ -583,10 +487,7 @@ export default async (req) => {
 
     // 2. Scrape for new items
     let newRawItems;
-    if (dataset === "10kdiver") {
-      const existingIds = new Set(existingThreads.map((t) => t.id));
-      newRawItems = await scrape10kDiverNew(existingIds);
-    } else if (dataset === "substack") {
+    if (dataset === "substack") {
       const existingIds = new Set(existingThreads.map((t) => t.id));
       newRawItems = await scrapeSubstackNew(existingIds);
     } else if (dataset === "blog") {

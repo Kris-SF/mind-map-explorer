@@ -1,6 +1,6 @@
 # Mind Map Explorer
 
-Interactive knowledge graph for exploring finance/investing content from [10K Diver](https://10kdiver.com/) and [Moontower](https://moontowerquant.com/) using D3.js force-directed graphs.
+Interactive knowledge graph for exploring Moontower content by Kris Abdelmessih across [moontowermeta.com](https://moontowermeta.com), [blog.moontower.ai](https://blog.moontower.ai), and [moontower.substack.com](https://moontower.substack.com) using D3.js force-directed graphs.
 
 **Live demo:** [mind-map-explorer.netlify.app](https://mind-map-explorer.netlify.app)
 
@@ -62,13 +62,11 @@ pip install -r requirements.txt
 export GEMINI_API_KEY=your-key-here
 
 # Scrape raw content
-python scrape_threads.py      # 10K Diver
 python scrape_moontower.py    # moontowermeta.com
 python scrape_blog.py         # blog.moontower.ai
 python scrape_substack.py     # moontower.substack.com
 
 # Enrich with AI (summaries, concepts, connections)
-python enrich_threads.py      # 10K Diver
 python enrich_moontower.py    # moontowermeta.com
 python enrich_blog.py         # blog.moontower.ai
 python enrich_substack.py     # moontower.substack.com

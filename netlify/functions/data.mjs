@@ -2,14 +2,14 @@ import { getStore } from "@netlify/blobs";
 import { readFile } from "fs/promises";
 import { join } from "path";
 
-const VALID_DATASETS = { moontower: "moontower_enriched", "10kdiver": "threads_enriched", substack: "substack_enriched", blog: "blog_enriched" };
+const VALID_DATASETS = { moontower: "moontower_enriched", substack: "substack_enriched", blog: "blog_enriched" };
 
 export default async (req, context) => {
   const url = new URL(req.url);
-  const dataset = url.searchParams.get("dataset") || "10kdiver";
+  const dataset = url.searchParams.get("dataset") || "moontower";
 
   if (!VALID_DATASETS[dataset]) {
-    return new Response(JSON.stringify({ error: "Invalid dataset. Use moontower, 10kdiver, substack, or blog." }), {
+    return new Response(JSON.stringify({ error: "Invalid dataset. Use moontower, substack, or blog." }), {
       status: 400,
       headers: { "Content-Type": "application/json" },
     });
