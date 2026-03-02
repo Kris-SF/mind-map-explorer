@@ -46,11 +46,11 @@ This serves the site locally with function endpoints available.
 
 ### Environment variables
 
-Set these in your Netlify dashboard (Site settings > Environment variables):
+Set these in your Vercel dashboard (Project > Settings > Environment Variables):
 
 | Variable | Description |
 |----------|-------------|
-| `GEMINI_API_KEY` | Google Gemini API key — used by chat and refresh functions |
+| `ANTHROPIC_API_KEY` | Anthropic API key — used by chat and refresh functions |
 
 ### Regenerating data from scratch
 
@@ -59,7 +59,7 @@ The `data/` directory ships with pre-computed datasets. To re-scrape and re-enri
 ```bash
 cd scraper
 pip install -r requirements.txt
-export GEMINI_API_KEY=your-key-here
+export ANTHROPIC_API_KEY=your-key-here
 
 # Scrape raw content
 python scrape_moontower.py    # moontowermeta.com
@@ -75,7 +75,7 @@ python enrich_substack.py     # moontower.substack.com
 ### Deploy
 
 ```bash
-netlify deploy --prod
+vercel --prod
 ```
 
 ## License

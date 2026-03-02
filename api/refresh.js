@@ -1,11 +1,11 @@
 import { list, put } from "@vercel/blob";
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import Anthropic from "@anthropic-ai/sdk";
 import * as cheerio from "cheerio";
 import { readFileSync } from "fs";
 import { join } from "path";
 
 const VALID_DATASETS = { moontower: "moontower_enriched", substack: "substack_enriched", blog: "blog_enriched" };
-const MODEL_NAME = "gemini-2.5-flash";
+const MODEL_NAME = "claude-haiku-4-5-20251001";
 
 export const maxDuration = 60;
 
@@ -311,15 +311,24 @@ async function scrapeBlogNew(existingIds) {
 }
 
 // ============================================================
-// Gemini enrichment
+// Claude (Anthropic) enrichment
 // ============================================================
-function getGenAI() {
-  const key = process.env.GEMINI_API_KEY;
-  if (!key) throw new Error("GEMINI_API_KEY not set");
-  return new GoogleGenerativeAI(key);
+function getClient() {
+  const key = process.env.ANTHROPIC_API_KEY;
+  if (!key) throw new Error("ANTHROPIC_API_KEY not set");
+  return new Anthropic({ apiKey: key });
 }
 
-async function enrichSingleItem(model, item, datasetType) {
+async function askClaude(client, prompt) {
+  const msg = await client.messages.create({
+    model: MODEL_NAME,
+    max_tokens: 4096,
+    messages: [{ role: "user", content: prompt }],
+  });
+  return stripFences(msg.content[0].text);
+}
+
+async function enrichSingleItem(client, item) {
   let content = (item.text || "").slice(0, 8000);
   if (!content.trim()) content = `(No content. Title: ${item.title})`;
   const prompt = `Analyze this article by Kris Abdelmessih (Moontower) about finance, options, volatility, or decision-making.
@@ -337,12 +346,11 @@ Return JSON (no markdown fences):
   "difficulty": "beginner|intermediate|advanced"
 }`;
 
-  const result = await model.generateContent(prompt);
-  const text = stripFences(result.response.text());
+  const text = await askClaude(client, prompt);
   return JSON.parse(text);
 }
 
-async function generateConnections(model, allItems, datasetType) {
+async function generateConnections(client, allItems) {
   const summaries = allItems
     .map(
       (t) =>
@@ -379,15 +387,14 @@ Guidelines:
 - Every item should belong to exactly one cluster
 - Use these colors: ${colors}`;
 
-  const result = await model.generateContent(prompt);
-  const text = stripFences(result.response.text());
+  const text = await askClaude(client, prompt);
   return JSON.parse(text);
 }
 
 // ============================================================
 // Quiz generation
 // ============================================================
-async function generateQuizzes(model, items, edges, datasetType) {
+async function generateQuizzes(client, items, edges) {
   const quizzes = [];
   const batchSize = 10;
 
@@ -416,8 +423,7 @@ Return JSON array (no markdown fences):
 Make questions test genuine understanding, not just memorization.`;
 
     try {
-      const result = await model.generateContent(prompt);
-      const text = stripFences(result.response.text());
+      const text = await askClaude(client, prompt);
       quizzes.push(...JSON.parse(text));
     } catch (e) {
       console.log(`Quiz batch error: ${e.message}`);
@@ -439,8 +445,7 @@ Return JSON array (no markdown fences):
 [{"id": "q_edge_<source_id>_<target_id>_0", "type": "connection", "source_thread_id": "<source_id>", "target_thread_id": "<target_id>", "question": "...", "answer": "...", "difficulty": "intermediate", "concepts": ["concept1"]}]`;
 
     try {
-      const result = await model.generateContent(prompt);
-      const text = stripFences(result.response.text());
+      const text = await askClaude(client, prompt);
       quizzes.push(...JSON.parse(text));
     } catch (e) {
       console.log(`Edge quiz batch error: ${e.message}`);
@@ -499,14 +504,13 @@ export default async function handler(req, res) {
       });
     }
 
-    // 4. Enrich new items via Gemini
-    const genAI = getGenAI();
-    const model = genAI.getGenerativeModel({ model: MODEL_NAME });
+    // 4. Enrich new items via Claude
+    const client = getClient();
 
     const enrichedNew = [];
     for (const item of newRawItems) {
       try {
-        const meta = await enrichSingleItem(model, item, dataset);
+        const meta = await enrichSingleItem(client, item);
         enrichedNew.push({
           ...item,
           summary: meta.summary || "",
@@ -531,7 +535,7 @@ export default async function handler(req, res) {
     console.log("Regenerating connections for full dataset...");
     let connections;
     try {
-      connections = await generateConnections(model, allThreads, dataset);
+      connections = await generateConnections(client, allThreads);
     } catch (e) {
       console.log(`Connections error: ${e.message}`);
       connections = {
@@ -559,7 +563,7 @@ export default async function handler(req, res) {
     console.log("Generating quizzes for new items...");
     let quizzes = existing.quizzes || [];
     try {
-      const newQuizzes = await generateQuizzes(model, enrichedNew, connections.edges || [], dataset);
+      const newQuizzes = await generateQuizzes(client, enrichedNew, connections.edges || []);
       quizzes = [...quizzes, ...newQuizzes];
       console.log(`Generated ${newQuizzes.length} new quiz questions`);
     } catch (e) {

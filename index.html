@@ -817,34 +817,22 @@ async function sendChat(question) {
     `Thread: ${s.thread.title}\nSummary: ${s.thread.summary}\nConcepts: ${(s.thread.concepts || []).join(', ')}`
   ).join('\n\n');
 
-  // Fetch Gemini key from server (falls back to hardcoded for local dev)
-  let GEMINI_KEY;
   try {
-    const keyResp = await fetch("/api/gemini-key");
-    if (keyResp.ok) { GEMINI_KEY = (await keyResp.json()).key; }
-  } catch (_) {}
-  if (!GEMINI_KEY) {
-    messagesEl.innerHTML += `<div class="chat-msg assistant">Chat requires a GEMINI_API_KEY. Set it in your Netlify environment variables.</div>`;
-    messagesEl.scrollTop = messagesEl.scrollHeight;
-    return;
-  }
-  try {
-    const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`, {
+    const resp = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        contents: [{ parts: [{ text: `You are a helpful assistant that answers questions based on the ${DATASETS[activeDataset].title} content.
-
-Here are the most relevant items:
-${context}
-
-Question: ${question}
-
-Answer concisely, citing specific items when relevant.` }] }]
+        question,
+        context,
+        datasetTitle: DATASETS[activeDataset].title,
       })
     });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.error || "Chat request failed");
+    }
     const data = await resp.json();
-    const answer = data.candidates?.[0]?.content?.parts?.[0]?.text || "Error getting response.";
+    const answer = data.answer || "Error getting response.";
     // Format markdown: bold, italic, bullets
     let html = answer
       .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
