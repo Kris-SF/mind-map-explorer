@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@netlify/blobs": "^8.1.0",
+    "@vercel/blob": "^0.27.0",
     "cheerio": "^1.0.0",
     "@google/generative-ai": "^0.21.0"
   }

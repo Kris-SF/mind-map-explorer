@@ -1,11 +1,13 @@
-import { getStore } from "@netlify/blobs";
+import { list, put } from "@vercel/blob";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import * as cheerio from "cheerio";
-import { readFile } from "fs/promises";
+import { readFileSync } from "fs";
 import { join } from "path";
 
 const VALID_DATASETS = { moontower: "moontower_enriched", substack: "substack_enriched", blog: "blog_enriched" };
 const MODEL_NAME = "gemini-2.5-flash";
+
+export const maxDuration = 60;
 
 // ============================================================
 // Helpers
@@ -24,19 +26,22 @@ async function fetchPage(url) {
 }
 
 // ============================================================
-// Load existing data (from Blobs or static fallback)
+// Load existing data (from Vercel Blob or static fallback)
 // ============================================================
 async function loadExistingData(blobKey) {
-  try {
-    const store = getStore("mindmap-data");
-    const data = await store.get(blobKey, { type: "json" });
-    if (data) return data;
-  } catch (e) {
-    console.log("Blobs read failed:", e.message);
+  if (process.env.BLOB_READ_WRITE_TOKEN) {
+    try {
+      const { blobs } = await list({ prefix: `mindmap-data/${blobKey}` });
+      if (blobs.length > 0) {
+        const resp = await fetch(blobs[0].downloadUrl);
+        return await resp.json();
+      }
+    } catch (e) {
+      console.log("Blob read failed:", e.message);
+    }
   }
-  // Fallback to static files
   const filePath = join(process.cwd(), "data", `${blobKey}.json`);
-  const raw = await readFile(filePath, "utf-8");
+  const raw = readFileSync(filePath, "utf-8");
   return JSON.parse(raw);
 }
 
@@ -47,7 +52,6 @@ async function scrapeMoontowerNew(existingUrls) {
   const indexHtml = await fetchPage("https://moontowerquant.com/moontower-content-by-kris-abdelmessih");
   const $ = cheerio.load(indexHtml);
 
-  // Get category page URLs
   const categoryUrls = [];
   const skipPaths = ["/moontower-content-by-kris-abdelmessih", "/about", "/contact", "/subscribe", "/newsletter"];
 
@@ -68,7 +72,6 @@ async function scrapeMoontowerNew(existingUrls) {
     }
   });
 
-  // For each category, get article links
   const allArticles = [];
   const seenUrls = new Set();
 
@@ -90,11 +93,9 @@ async function scrapeMoontowerNew(existingUrls) {
     }
   }
 
-  // Find new ones
   const newArticles = allArticles.filter((a) => !existingUrls.has(a.url));
   console.log(`Moontower: ${allArticles.length} total, ${newArticles.length} new`);
 
-  // Fetch content for new articles
   const results = [];
 
   for (const article of newArticles) {
@@ -102,12 +103,10 @@ async function scrapeMoontowerNew(existingUrls) {
       const pageHtml = await fetchPage(article.url);
       const $page = cheerio.load(pageHtml);
 
-      // Extract title
       let title = $page("h1").first().text().trim();
       if (!title) title = $page("title").text().trim();
       if (!title) title = article.title;
 
-      // Extract body
       let text = "";
       for (const selector of ["article", ".post-content", ".entry-content", ".content", "main"]) {
         const el = $page(selector).first();
@@ -124,7 +123,7 @@ async function scrapeMoontowerNew(existingUrls) {
       }
 
       results.push({
-        id: null, // assigned later
+        id: null,
         title: title || article.title,
         url: article.url,
         category: article.category,
@@ -145,7 +144,6 @@ async function scrapeSubstackNew(existingIds) {
   const ARCHIVE_API = `https://${SUBSTACK_DOMAIN}/api/v1/archive`;
   const PAGE_SIZE = 12;
 
-  // Paginate through the archive API
   const allPosts = [];
   let offset = 0;
 
@@ -166,7 +164,6 @@ async function scrapeSubstackNew(existingIds) {
 
   console.log(`Substack: ${allPosts.length} total posts found`);
 
-  // Filter to new posts only
   const newPosts = allPosts.filter((p) => !existingIds.has(`ss_${p.id}`));
   console.log(`Substack: ${newPosts.length} new`);
 
@@ -176,13 +173,11 @@ async function scrapeSubstackNew(existingIds) {
       const postUrl = post.canonical_url || `https://${SUBSTACK_DOMAIN}/p/${post.slug}`;
       let text = "";
 
-      // Substack API often includes body_html
       if (post.body_html) {
         const $ = cheerio.load(post.body_html);
         $("script, style, nav, footer, header").remove();
         text = $.root().text().trim();
       } else {
-        // Fall back to scraping the post page
         const pageHtml = await fetchPage(postUrl);
         const $ = cheerio.load(pageHtml);
         for (const selector of [".body", ".post-content", ".available-content", "article", "main"]) {
@@ -223,7 +218,6 @@ async function scrapeBlogNew(existingIds) {
   const BLOG_URL = "https://blog.moontower.ai";
   const allPostUrls = [];
 
-  // Try Ghost sitemap first
   try {
     const sitemapHtml = await fetchPage(`${BLOG_URL}/sitemap-posts.xml`);
     const $ = cheerio.load(sitemapHtml, { xmlMode: true });
@@ -235,12 +229,10 @@ async function scrapeBlogNew(existingIds) {
     console.log(`Blog sitemap error: ${e.message}`);
   }
 
-  // Fall back to sitemap index
   if (!allPostUrls.length) {
     try {
       const sitemapHtml = await fetchPage(`${BLOG_URL}/sitemap.xml`);
       const $ = cheerio.load(sitemapHtml, { xmlMode: true });
-      // Check for sitemap index pointing to posts sitemap
       const postsSitemapUrl = [];
       $("sitemap loc").each((_, el) => {
         const loc = $(el).text().trim();
@@ -254,7 +246,6 @@ async function scrapeBlogNew(existingIds) {
           if (loc && loc !== BLOG_URL + "/") allPostUrls.push(loc);
         });
       }
-      // Also check direct url entries
       if (!allPostUrls.length) {
         $("url loc").each((_, el) => {
           const loc = $(el).text().trim();
@@ -266,16 +257,13 @@ async function scrapeBlogNew(existingIds) {
     }
   }
 
-  // Filter out non-post URLs
   const skipPrefixes = ["/tag/", "/author/", "/page/", "/ghost/"];
   const postUrls = allPostUrls.filter((url) => {
     const path = url.replace(BLOG_URL, "");
     return !skipPrefixes.some((p) => path.startsWith(p)) && path !== "" && path !== "/";
   });
 
-  // Find new posts
   const newPostUrls = postUrls.filter((url) => {
-    // Generate a stable ID from the URL slug
     const slug = url.replace(BLOG_URL, "").replace(/^\/|\/$/g, "");
     return !existingIds.has(`blog_${slug}`);
   });
@@ -405,7 +393,6 @@ async function generateQuizzes(model, items, edges, datasetType) {
 
   const topicLabel = "articles about options, volatility, and decision-making by Kris Abdelmessih";
 
-  // Per-item quizzes in batches
   for (let i = 0; i < items.length; i += batchSize) {
     const batch = items.slice(i, i + batchSize);
     const block = batch
@@ -437,7 +424,6 @@ Make questions test genuine understanding, not just memorization.`;
     }
   }
 
-  // Connection quizzes from edges
   const titleMap = Object.fromEntries(items.map((t) => [t.id, t.title]));
   const edgeBatchSize = 20;
   for (let i = 0; i < edges.length; i += edgeBatchSize) {
@@ -467,15 +453,18 @@ Return JSON array (no markdown fences):
 // ============================================================
 // Main handler
 // ============================================================
-export default async (req) => {
+export default async function handler(req, res) {
   if (req.method !== "POST") {
-    return new Response(JSON.stringify({ error: "POST only" }), { status: 405, headers: { "Content-Type": "application/json" } });
+    return res.status(405).json({ error: "POST only" });
   }
 
-  const url = new URL(req.url);
-  const dataset = url.searchParams.get("dataset") || "moontower";
+  const dataset = req.query.dataset || "moontower";
   if (!VALID_DATASETS[dataset]) {
-    return new Response(JSON.stringify({ error: "Invalid dataset" }), { status: 400, headers: { "Content-Type": "application/json" } });
+    return res.status(400).json({ error: "Invalid dataset" });
+  }
+
+  if (!process.env.BLOB_READ_WRITE_TOKEN) {
+    return res.status(500).json({ error: "Vercel Blob not configured. Add a Blob store to enable refresh." });
   }
 
   const blobKey = VALID_DATASETS[dataset];
@@ -499,9 +488,7 @@ export default async (req) => {
     }
 
     if (newRawItems.length === 0) {
-      return new Response(JSON.stringify({ success: true, newCount: 0, message: "No new articles found." }), {
-        headers: { "Content-Type": "application/json" },
-      });
+      return res.status(200).json({ success: true, newCount: 0, message: "No new articles found." });
     }
 
     // 3. Assign IDs to new Moontower articles
@@ -540,14 +527,13 @@ export default async (req) => {
     // 5. Merge with existing threads
     const allThreads = [...existingThreads, ...enrichedNew];
 
-    // 6. Re-generate connections (Pass 2) on full dataset
+    // 6. Re-generate connections on full dataset
     console.log("Regenerating connections for full dataset...");
     let connections;
     try {
       connections = await generateConnections(model, allThreads, dataset);
     } catch (e) {
       console.log(`Connections error: ${e.message}`);
-      // Keep existing connections
       connections = {
         edges: existing.edges || [],
         clusters: existing.clusters || [],
@@ -569,7 +555,7 @@ export default async (req) => {
       .map((c) => ({ name: c.name, thread_ids: [...c.thread_ids], description: "" }))
       .sort((a, b) => b.thread_ids.length - a.thread_ids.length);
 
-    // 7.5 Generate quizzes for new items, merge with existing
+    // 7.5 Generate quizzes for new items
     console.log("Generating quizzes for new items...");
     let quizzes = existing.quizzes || [];
     try {
@@ -601,21 +587,21 @@ export default async (req) => {
       quizzes,
     };
 
-    // 10. Save to Blobs
-    const store = getStore("mindmap-data");
-    await store.setJSON(blobKey, output);
+    // 10. Save to Vercel Blob
+    await put(`mindmap-data/${blobKey}.json`, JSON.stringify(output), {
+      contentType: "application/json",
+      access: "public",
+      addRandomSuffix: false,
+    });
 
-    return new Response(
-      JSON.stringify({
-        success: true,
-        newCount: enrichedNew.length,
-        totalCount: allThreads.length,
-        message: `Added ${enrichedNew.length} new articles. Total: ${allThreads.length}.`,
-      }),
-      { headers: { "Content-Type": "application/json" } }
-    );
+    return res.status(200).json({
+      success: true,
+      newCount: enrichedNew.length,
+      totalCount: allThreads.length,
+      message: `Added ${enrichedNew.length} new articles. Total: ${allThreads.length}.`,
+    });
   } catch (e) {
     console.error("Refresh error:", e);
-    return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: { "Content-Type": "application/json" } });
+    return res.status(500).json({ error: e.message });
   }
-};
+}

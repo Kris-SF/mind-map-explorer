@@ -349,19 +349,19 @@ let activeDataset = "moontower";
 
 const DATASETS = {
   "moontower": {
-    file: "/.netlify/functions/data?dataset=moontower",
+    file: "/api/data?dataset=moontower",
     staticFile: "data/moontower_enriched.json",
     title: "moontowermeta.com",
     subtitle: "446 articles on options, volatility & decision-making",
   },
   "blog": {
-    file: "/.netlify/functions/data?dataset=blog",
+    file: "/api/data?dataset=blog",
     staticFile: "data/blog_enriched.json",
     title: "blog.moontower.ai",
     subtitle: "Blog posts on options analytics & volatility",
   },
   "substack": {
-    file: "/.netlify/functions/data?dataset=substack",
+    file: "/api/data?dataset=substack",
     staticFile: "data/substack_enriched.json",
     title: "moontower.substack.com",
     subtitle: "Newsletter posts on options, volatility & decision-making",
@@ -820,7 +820,7 @@ async function sendChat(question) {
   // Fetch Gemini key from server (falls back to hardcoded for local dev)
   let GEMINI_KEY;
   try {
-    const keyResp = await fetch("/.netlify/functions/gemini-key");
+    const keyResp = await fetch("/api/gemini-key");
     if (keyResp.ok) { GEMINI_KEY = (await keyResp.json()).key; }
   } catch (_) {}
   if (!GEMINI_KEY) {
@@ -1012,7 +1012,7 @@ async function refreshData() {
   btn.classList.add("loading");
   btn.querySelector(".spinner").style.display = "inline-block";
   try {
-    const resp = await fetch(`/.netlify/functions/refresh?dataset=${activeDataset}`, { method: "POST" });
+    const resp = await fetch(`/api/refresh?dataset=${activeDataset}`, { method: "POST" });
     const result = await resp.json();
     if (!resp.ok) throw new Error(result.error || "Refresh failed");
     if (result.newCount > 0) {
