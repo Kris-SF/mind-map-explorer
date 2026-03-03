@@ -6,6 +6,7 @@ import { join } from "path";
 
 const VALID_DATASETS = { moontower: "moontower_enriched", substack: "substack_enriched", blog: "blog_enriched" };
 const MODEL_NAME = "claude-haiku-4-5-20251001";
+const BATCH_LIMIT = 10; // max posts to scrape+enrich per refresh (to stay within 60s timeout)
 
 export const maxDuration = 60;
 
@@ -186,10 +187,10 @@ async function scrapeSubstackNew(existingIds) {
   }
 
   const newPosts = allPosts.filter((p) => !existingIds.has(`ss_${p.id}`));
-  console.log(`Substack: ${newPosts.length} new`);
+  console.log(`Substack: ${newPosts.length} new (processing up to ${BATCH_LIMIT})`);
 
   const results = [];
-  for (const post of newPosts) {
+  for (const post of newPosts.slice(0, BATCH_LIMIT)) {
     try {
       const postUrl = post.canonical_url || `https://${SUBSTACK_DOMAIN}/p/${post.slug}`;
       let text = "";
@@ -229,7 +230,7 @@ async function scrapeSubstackNew(existingIds) {
       console.log(`Error fetching Substack post ${post.id}: ${e.message}`);
     }
   }
-  return results;
+  return { items: results, totalNew: newPosts.length };
 }
 
 // ============================================================
@@ -289,13 +290,13 @@ async function scrapeBlogNew(existingIds) {
     return !existingIds.has(`blog_${slug}`);
   });
 
-  console.log(`Blog: ${postUrls.length} total, ${newPostUrls.length} new`);
+  console.log(`Blog: ${postUrls.length} total, ${newPostUrls.length} new (processing up to ${BATCH_LIMIT})`);
   if (postUrls.length === 0) {
     throw new Error("blog.moontower.ai sitemap returned no posts — the site may be down or the sitemap structure changed.");
   }
 
   const results = [];
-  for (const postUrl of newPostUrls) {
+  for (const postUrl of newPostUrls.slice(0, BATCH_LIMIT)) {
     try {
       const pageHtml = await fetchPage(postUrl);
       const $ = cheerio.load(pageHtml);
@@ -331,7 +332,7 @@ async function scrapeBlogNew(existingIds) {
       console.log(`Error fetching blog post ${postUrl}: ${e.message}`);
     }
   }
-  return results;
+  return { items: results, totalNew: newPostUrls.length };
 }
 
 // ============================================================
@@ -503,14 +504,19 @@ export default async function handler(req, res) {
     const existing = await loadExistingData(blobKey);
     const existingThreads = existing.threads || [];
 
-    // 2. Scrape for new items
+    // 2. Scrape for new items (batched — returns up to BATCH_LIMIT)
     let newRawItems;
+    let totalNewAvailable = 0;
     if (dataset === "substack") {
       const existingIds = new Set(existingThreads.map((t) => t.id));
-      newRawItems = await scrapeSubstackNew(existingIds);
+      const { items, totalNew } = await scrapeSubstackNew(existingIds);
+      newRawItems = items;
+      totalNewAvailable = totalNew;
     } else if (dataset === "blog") {
       const existingIds = new Set(existingThreads.map((t) => t.id));
-      newRawItems = await scrapeBlogNew(existingIds);
+      const { items, totalNew } = await scrapeBlogNew(existingIds);
+      newRawItems = items;
+      totalNewAvailable = totalNew;
     } else {
       const existingUrls = new Set(existingThreads.map((t) => t.url));
       newRawItems = await scrapeMoontowerNew(existingUrls);
@@ -622,11 +628,14 @@ export default async function handler(req, res) {
       addRandomSuffix: false,
     });
 
+    const remaining = totalNewAvailable - enrichedNew.length;
+    const remainingMsg = remaining > 0 ? ` ${remaining} more available — refresh again to continue.` : "";
     return res.status(200).json({
       success: true,
       newCount: enrichedNew.length,
       totalCount: allThreads.length,
-      message: `Added ${enrichedNew.length} new articles. Total: ${allThreads.length}.`,
+      remaining,
+      message: `Added ${enrichedNew.length} new articles. Total: ${allThreads.length}.${remainingMsg}`,
     });
   } catch (e) {
     console.error("Refresh error:", e);
