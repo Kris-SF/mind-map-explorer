@@ -17,7 +17,14 @@ export const maxDuration = 60;
 // ============================================================
 function stripFences(text) {
   text = text.trim();
-  if (text.startsWith("```")) text = text.split("\n", 1).length > 1 ? text.slice(text.indexOf("\n") + 1) : text;
+  if (text.startsWith("```")) {
+    const newlineIdx = text.indexOf("\n");
+    if (newlineIdx !== -1) {
+      text = text.slice(newlineIdx + 1);
+    } else {
+      text = text.slice(3);
+    }
+  }
   if (text.endsWith("```")) text = text.slice(0, -3);
   return text.trim();
 }
@@ -556,6 +563,7 @@ export default async function handler(req, res) {
     // 4. Enrich new items + re-enrich existing items with missing data
     const client = getClient();
     const startTime = Date.now();
+    const enrichErrors = [];
 
     async function enrichWithFallback(item) {
       try {
@@ -567,7 +575,9 @@ export default async function handler(req, res) {
           difficulty: meta.difficulty || "intermediate",
         };
       } catch (e) {
-        console.log(`Enrichment error for ${item.title}: ${e.message}`);
+        const errMsg = `${item.title}: ${e.message}`.slice(0, 120);
+        console.log(`Enrichment error for ${errMsg}`);
+        enrichErrors.push(errMsg);
         return { ...item, summary: "", concepts: [], difficulty: "intermediate" };
       }
     }
@@ -693,19 +703,23 @@ export default async function handler(req, res) {
 
     const remaining = totalNewAvailable - enrichedNew.length;
     const reEnrichedCount = reEnriched.filter((r) => r.summary).length;
+    const enrichedNewSuccess = enrichedNew.filter((r) => r.summary).length;
     const parts = [];
-    if (enrichedNew.length > 0) parts.push(`Added ${enrichedNew.length} new articles`);
+    if (enrichedNew.length > 0) parts.push(`Added ${enrichedNew.length} new (${enrichedNewSuccess} enriched)`);
     if (reEnrichedCount > 0) parts.push(`re-enriched ${reEnrichedCount} existing`);
     parts.push(`Total: ${allThreads.length}`);
-    if (remaining > 0) parts.push(`${remaining} more available — refresh again to continue`);
+    if (remaining > 0) parts.push(`${remaining} more available — refresh again`);
     const staleRemaining = allThreads.filter((t) => !t.summary || !t.concepts || t.concepts.length === 0).length;
     if (staleRemaining > 0) parts.push(`${staleRemaining} still need enrichment`);
+    if (enrichErrors.length > 0) parts.push(`Enrichment errors: ${enrichErrors.slice(0, 3).join("; ")}`);
 
     return res.status(200).json({
       success: true,
       newCount: enrichedNew.length,
       totalCount: allThreads.length,
       remaining,
+      enrichedCount: enrichedNewSuccess + reEnrichedCount,
+      enrichErrors: enrichErrors.length,
       message: parts.join(". ") + ".",
     });
   } catch (e) {

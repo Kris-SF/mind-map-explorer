@@ -1003,12 +1003,9 @@ async function refreshData() {
     const resp = await fetch(`/api/refresh?dataset=${activeDataset}`, { method: "POST" });
     const result = await resp.json();
     if (!resp.ok) throw new Error(result.error || "Refresh failed");
-    if (result.newCount > 0) {
-      showToast(`Added ${result.newCount} new articles (total: ${result.totalCount})`);
-      await loadData(activeDataset);
-    } else {
-      showToast("No new articles found.");
-    }
+    const changed = result.newCount > 0 || (result.enrichedCount || 0) > 0;
+    showToast(result.message || "No new articles found.", changed ? 5000 : 3000);
+    if (changed) await loadData(activeDataset);
   } catch (e) {
     showToast(`Refresh error: ${e.message}`, 5000);
   } finally {
