@@ -380,19 +380,26 @@ async function askClaude(client, prompt, maxTokens = 4096) {
 async function enrichSingleItem(client, item) {
   let content = (item.text || "").slice(0, 8000);
   if (!content.trim()) content = `(No content. Title: ${item.title})`;
+  const existingCategory = item.category && item.category !== "Unknown" && item.category !== "General" ? item.category : null;
+  const categoryInstruction = existingCategory
+    ? `The article's known category is "${existingCategory}". Use this as the category unless it is clearly wrong.`
+    : `Assign the most fitting category from this list: "Options and Volatility", "Risk and the math of returns", "Numeracy & Decision-Making", "Probability & Statistics", "Behavioral Finance & Psychology", "Portfolio Theory", "Valuation & Capital Allocation", "Compounding & Growth", "Training, Interviews, & Career", "Commentary", "Investing", "Market Microstructure". Pick the single best match.`;
   const prompt = `Analyze this article by Kris Abdelmessih (Moontower) about finance, options, volatility, or decision-making.
 
 Title: ${item.title}
-Category: ${item.category || "Unknown"}
+${existingCategory ? `Category: ${existingCategory}` : ""}
 
 Article content:
 ${content}
+
+${categoryInstruction}
 
 Return JSON (no markdown fences):
 {
   "summary": "2-3 sentence summary of the article's key message",
   "concepts": ["list", "of", "key", "concepts"],
-  "difficulty": "beginner|intermediate|advanced"
+  "difficulty": "beginner|intermediate|advanced",
+  "category": "the topic category for this article"
 }`;
 
   const text = await askClaude(client, prompt);
@@ -546,8 +553,11 @@ export default async function handler(req, res) {
       newRawItems = await scrapeMoontowerNew(existingUrls);
     }
 
-    // Check if there are stale items that need re-enrichment
-    const staleCount = existingThreads.filter((t) => !t.summary || !t.concepts || t.concepts.length === 0).length;
+    // Check if there are stale items that need re-enrichment (missing summary/concepts OR missing category)
+    const needsCategory = (t) => !t.category || t.category === "Unknown" || t.category === "General";
+    const needsCluster = (t) => !t.cluster || t.cluster === "General";
+    const needsEnrichment = (t) => !t.summary || !t.concepts || t.concepts.length === 0;
+    const staleCount = existingThreads.filter((t) => needsEnrichment(t) || needsCategory(t)).length;
     if (newRawItems.length === 0 && staleCount === 0) {
       return res.status(200).json({ success: true, newCount: 0, message: "No new articles found. All existing articles are enriched." });
     }
@@ -573,6 +583,7 @@ export default async function handler(req, res) {
           summary: meta.summary || "",
           concepts: meta.concepts || [],
           difficulty: meta.difficulty || "intermediate",
+          category: meta.category || item.category || "General",
         };
       } catch (e) {
         const errMsg = `${item.title}: ${e.message}`.slice(0, 120);
@@ -582,12 +593,18 @@ export default async function handler(req, res) {
       }
     }
 
-    // Find existing items with missing enrichment (from previous failed runs)
+    // Find existing items with missing enrichment or missing category
     const staleItems = existingThreads.filter(
-      (t) => !t.summary || !t.concepts || t.concepts.length === 0
+      (t) => needsEnrichment(t) || needsCategory(t)
     );
+    // Prioritize items missing enrichment first, then items just missing category
+    staleItems.sort((a, b) => {
+      const aEnrich = needsEnrichment(a) ? 0 : 1;
+      const bEnrich = needsEnrichment(b) ? 0 : 1;
+      return aEnrich - bEnrich;
+    });
     const itemsToEnrich = [...newRawItems, ...staleItems.slice(0, BATCH_LIMIT)];
-    console.log(`Enriching: ${newRawItems.length} new + ${Math.min(staleItems.length, BATCH_LIMIT)} stale (of ${staleItems.length} total stale)`);
+    console.log(`Enriching: ${newRawItems.length} new + ${Math.min(staleItems.length, BATCH_LIMIT)} stale (of ${staleItems.length} total stale, ${staleItems.filter(needsCategory).length} need category)`);
 
     // Process in parallel batches of ENRICHMENT_CONCURRENCY
     const enrichedResults = [];
@@ -606,13 +623,22 @@ export default async function handler(req, res) {
     // Update existing threads with re-enriched data
     if (reEnriched.length > 0) {
       const reEnrichedMap = new Map(reEnriched.map((r) => [r.id, r]));
+      let updatedCount = 0;
       for (let i = 0; i < existingThreads.length; i++) {
         const updated = reEnrichedMap.get(existingThreads[i].id);
-        if (updated && updated.summary) {
-          existingThreads[i] = { ...existingThreads[i], summary: updated.summary, concepts: updated.concepts, difficulty: updated.difficulty };
+        if (updated) {
+          const patch = {};
+          if (updated.summary) patch.summary = updated.summary;
+          if (updated.concepts && updated.concepts.length > 0) patch.concepts = updated.concepts;
+          if (updated.difficulty) patch.difficulty = updated.difficulty;
+          if (updated.category && updated.category !== "General" && updated.category !== "Unknown") patch.category = updated.category;
+          if (Object.keys(patch).length > 0) {
+            existingThreads[i] = { ...existingThreads[i], ...patch };
+            updatedCount++;
+          }
         }
       }
-      console.log(`Re-enriched ${reEnriched.filter((r) => r.summary).length} previously stale items`);
+      console.log(`Re-enriched ${updatedCount} previously stale items`);
     }
 
     // 5. Merge with existing threads
@@ -673,7 +699,7 @@ export default async function handler(req, res) {
       }
     }
 
-    // 8. Assign clusters
+    // 8. Assign clusters (use category as fallback instead of "General")
     const clusterLookup = {};
     for (const cluster of connections.clusters || []) {
       for (const tid of cluster.thread_ids || []) {
@@ -681,7 +707,13 @@ export default async function handler(req, res) {
       }
     }
     for (const t of allThreads) {
-      t.cluster = clusterLookup[t.id] || t.cluster || "General";
+      const fromCluster = clusterLookup[t.id];
+      if (fromCluster) {
+        t.cluster = fromCluster;
+      } else if (!t.cluster || t.cluster === "General") {
+        // Use category as a better fallback than "General"
+        t.cluster = t.category && t.category !== "Unknown" && t.category !== "General" ? t.category : t.cluster || "General";
+      }
     }
 
     // 9. Build final output
@@ -709,7 +741,7 @@ export default async function handler(req, res) {
     if (reEnrichedCount > 0) parts.push(`re-enriched ${reEnrichedCount} existing`);
     parts.push(`Total: ${allThreads.length}`);
     if (remaining > 0) parts.push(`${remaining} more available — refresh again`);
-    const staleRemaining = allThreads.filter((t) => !t.summary || !t.concepts || t.concepts.length === 0).length;
+    const staleRemaining = allThreads.filter((t) => needsEnrichment(t) || needsCategory(t)).length;
     if (staleRemaining > 0) parts.push(`${staleRemaining} still need enrichment`);
     if (enrichErrors.length > 0) parts.push(`Enrichment errors: ${enrichErrors.slice(0, 3).join("; ")}`);
 
