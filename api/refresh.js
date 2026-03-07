@@ -167,29 +167,104 @@ async function askClaude(client, prompt, maxTokens = 4096) {
   return stripFences(msg.content[0].text);
 }
 
+const CANONICAL_CATEGORIES = [
+  "Options & Volatility",
+  "Probability & Decision-Making",
+  "Risk Management & Portfolio Theory",
+  "Market Microstructure & Trading",
+  "Behavioral Finance & Psychology",
+  "Career & Professional Development",
+  "Personal Finance & Investing",
+  "Commentary & Market Analysis",
+];
+
+// Map any free-form category to the closest canonical one
+const CATEGORY_MAP = {
+  // Options-related
+  "options and volatility": "Options & Volatility",
+  "options pricing & greeks": "Options & Volatility",
+  "options theory & mechanics": "Options & Volatility",
+  "volatility trading & surface": "Options & Volatility",
+  "volatility drag & compounding": "Options & Volatility",
+  "advanced volatility trading & surface": "Options & Volatility",
+  "series on option greeks": "Options & Volatility",
+  "options and volatility": "Options & Volatility",
+  "shorting & leverage": "Options & Volatility",
+  // Probability / decision-making
+  "probability & decision making": "Probability & Decision-Making",
+  "probability, calibration & statistics": "Probability & Decision-Making",
+  "probability & statistics": "Probability & Decision-Making",
+  "decision-making & expected value": "Probability & Decision-Making",
+  "numeracy & decision-making": "Probability & Decision-Making",
+  "core math & risk fundamentals": "Probability & Decision-Making",
+  "compounding & growth": "Probability & Decision-Making",
+  // Risk / portfolio
+  "risk management & portfolio theory": "Risk Management & Portfolio Theory",
+  "portfolio construction & risk management": "Risk Management & Portfolio Theory",
+  "portfolio theory & risk management": "Risk Management & Portfolio Theory",
+  "portfolio theory": "Risk Management & Portfolio Theory",
+  "risk and the math of returns": "Risk Management & Portfolio Theory",
+  "portfolio theory and life": "Risk Management & Portfolio Theory",
+  "portfolio theory is not intuitive": "Risk Management & Portfolio Theory",
+  "valuation & capital allocation": "Risk Management & Portfolio Theory",
+  // Market micro
+  "market microstructure & trading": "Market Microstructure & Trading",
+  "market microstructure": "Market Microstructure & Trading",
+  "market structure & efficiency": "Market Microstructure & Trading",
+  "the meta of market efficiency": "Market Microstructure & Trading",
+  "finding edges": "Market Microstructure & Trading",
+  // Behavioral
+  "behavioral finance & psychology": "Behavioral Finance & Psychology",
+  // Career
+  "career & professional development": "Career & Professional Development",
+  "career, finance careers & education": "Career & Professional Development",
+  "career & trader development": "Career & Professional Development",
+  "training, interviews, & career": "Career & Professional Development",
+  "notes on interviews": "Career & Professional Development",
+  // Personal finance
+  "personal finance & investing": "Personal Finance & Investing",
+  "personal finance & life decisions": "Personal Finance & Investing",
+  "investing & personal finance": "Personal Finance & Investing",
+  "investing": "Personal Finance & Investing",
+  "real estate and property": "Personal Finance & Investing",
+  "wealth and mindset": "Personal Finance & Investing",
+  // Commentary
+  "commentary & market analysis": "Commentary & Market Analysis",
+  "market commentary & life philosophy": "Commentary & Market Analysis",
+  "commentary": "Commentary & Market Analysis",
+  "reading recs": "Commentary & Market Analysis",
+};
+
+function normalizeCategory(raw) {
+  if (!raw) return null;
+  const key = raw.toLowerCase().trim();
+  if (CATEGORY_MAP[key]) return CATEGORY_MAP[key];
+  // Check if it's already canonical
+  const canonical = CANONICAL_CATEGORIES.find((c) => c.toLowerCase() === key);
+  if (canonical) return canonical;
+  return null;
+}
+
 async function enrichSingleItem(client, item) {
   let content = (item.text || "").slice(0, 8000);
   if (!content.trim()) content = `(No content. Title: ${item.title})`;
-  const existingCategory = item.category && item.category !== "Unknown" && item.category !== "General" ? item.category : null;
-  const categoryInstruction = existingCategory
-    ? `The article's known category is "${existingCategory}". Use this as the category unless it is clearly wrong.`
-    : `Assign the most fitting category from this list: "Options and Volatility", "Risk and the math of returns", "Numeracy & Decision-Making", "Probability & Statistics", "Behavioral Finance & Psychology", "Portfolio Theory", "Valuation & Capital Allocation", "Compounding & Growth", "Training, Interviews, & Career", "Commentary", "Investing", "Market Microstructure". Pick the single best match.`;
+  const categoryList = CANONICAL_CATEGORIES.map((c) => `"${c}"`).join(", ");
   const prompt = `Analyze this article by Kris Abdelmessih (Moontower) about finance, options, volatility, or decision-making.
 
 Title: ${item.title}
-${existingCategory ? `Category: ${existingCategory}` : ""}
 
 Article content:
 ${content}
 
-${categoryInstruction}
+Assign EXACTLY ONE category from this list: ${categoryList}
+You MUST pick one of these exact strings. Do not invent new categories.
 
 Return JSON (no markdown fences):
 {
   "summary": "2-3 sentence summary of the article's key message",
   "concepts": ["list", "of", "key", "concepts"],
   "difficulty": "beginner|intermediate|advanced",
-  "category": "the topic category for this article"
+  "category": "one of the exact categories from the list above"
 }`;
 
   const text = await askClaude(client, prompt);
@@ -325,14 +400,19 @@ export default async function handler(req, res) {
     const existing = await loadExistingData(blobKey);
     const existingThreads = existing.threads || [];
 
+    // Normalize existing categories to canonical names where possible
+    for (const t of existingThreads) {
+      const norm = normalizeCategory(t.category);
+      if (norm) t.category = norm;
+    }
+
     // 2. Scrape for new items (batched — returns up to BATCH_LIMIT)
     const existingUrls = new Set(existingThreads.map((t) => t.url));
     const newRawItems = await scrapeMoontowerNew(existingUrls);
     let totalNewAvailable = newRawItems.length;
 
-    // Check if there are stale items that need re-enrichment (missing summary/concepts OR missing category)
-    const needsCategory = (t) => !t.category || t.category === "Unknown" || t.category === "General";
-    const needsCluster = (t) => !t.cluster || t.cluster === "General";
+    // Check if there are stale items that need re-enrichment (missing summary/concepts OR non-canonical category)
+    const needsCategory = (t) => !normalizeCategory(t.category);
     const needsEnrichment = (t) => !t.summary || !t.concepts || t.concepts.length === 0;
     const staleCount = existingThreads.filter((t) => needsEnrichment(t) || needsCategory(t)).length;
     if (newRawItems.length === 0 && staleCount === 0) {
@@ -358,7 +438,7 @@ export default async function handler(req, res) {
           summary: meta.summary || "",
           concepts: meta.concepts || [],
           difficulty: meta.difficulty || "intermediate",
-          category: meta.category || item.category || "General",
+          category: normalizeCategory(meta.category) || normalizeCategory(item.category) || meta.category || "Commentary & Market Analysis",
         };
       } catch (e) {
         const errMsg = `${item.title}: ${e.message}`.slice(0, 120);
@@ -406,7 +486,7 @@ export default async function handler(req, res) {
           if (updated.summary) patch.summary = updated.summary;
           if (updated.concepts && updated.concepts.length > 0) patch.concepts = updated.concepts;
           if (updated.difficulty) patch.difficulty = updated.difficulty;
-          if (updated.category && updated.category !== "General" && updated.category !== "Unknown") patch.category = updated.category;
+          if (updated.category && normalizeCategory(updated.category)) patch.category = normalizeCategory(updated.category);
           if (Object.keys(patch).length > 0) {
             existingThreads[i] = { ...existingThreads[i], ...patch };
             updatedCount++;
