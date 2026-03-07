@@ -644,32 +644,7 @@ export default async function handler(req, res) {
     // 5. Merge with existing threads
     const allThreads = [...existingThreads, ...enrichedNew];
 
-    // 6. Re-generate connections on full dataset (skip if running low on time)
-    let connections;
-    const timeUsed = Date.now() - startTime;
-    const timeLeft = TIME_BUDGET_MS - timeUsed;
-    if (timeLeft < 10000) {
-      console.log(`Skipping connections — only ${timeLeft}ms left (need ~10s)`);
-      connections = {
-        edges: existing.edges || [],
-        clusters: existing.clusters || [],
-        learning_paths: existing.learning_paths || [],
-      };
-    } else {
-      console.log(`Regenerating connections for ${allThreads.length} items (${timeLeft}ms remaining)...`);
-      try {
-        connections = await generateConnections(client, allThreads);
-      } catch (e) {
-        console.log(`Connections error: ${e.message}`);
-        connections = {
-          edges: existing.edges || [],
-          clusters: existing.clusters || [],
-          learning_paths: existing.learning_paths || [],
-        };
-      }
-    }
-
-    // 7. Rebuild concepts list
+    // 6. Rebuild concepts list (no Claude call needed — fast)
     const conceptMap = {};
     for (const t of allThreads) {
       for (const c of t.concepts || []) {
@@ -683,10 +658,9 @@ export default async function handler(req, res) {
       .map((c) => ({ name: c.name, thread_ids: [...c.thread_ids], description: "" }))
       .sort((a, b) => b.thread_ids.length - a.thread_ids.length);
 
-    // 7.5 Generate quizzes for items that don't have them yet
+    // 7. Generate quizzes BEFORE connections (quizzes are user-facing, connections can wait)
     let quizzes = existing.quizzes || [];
     const existingQuizThreadIds = new Set(quizzes.map((q) => q.thread_id));
-    // Include newly enriched items + any existing items without quizzes
     const itemsNeedingQuizzes = [
       ...enrichedNew.filter((t) => t.summary),
       ...reEnriched.filter((t) => t.summary && !existingQuizThreadIds.has(t.id)),
@@ -701,7 +675,8 @@ export default async function handler(req, res) {
     } else {
       console.log(`Generating quizzes for ${itemsNeedingQuizzes.length} items (${timeLeftForQuizzes}ms remaining)...`);
       try {
-        const newQuizzes = await generateQuizzes(client, itemsNeedingQuizzes, connections.edges || []);
+        // Only generate item-based quizzes here (skip edge quizzes to save time)
+        const newQuizzes = await generateQuizzes(client, itemsNeedingQuizzes, []);
         quizzes = [...quizzes, ...newQuizzes];
         console.log(`Generated ${newQuizzes.length} new quiz questions`);
       } catch (e) {
@@ -709,7 +684,31 @@ export default async function handler(req, res) {
       }
     }
 
-    // 8. Assign clusters (use category as fallback instead of "General")
+    // 8. Re-generate connections on full dataset (skip if running low on time)
+    let connections;
+    const timeLeftForConnections = TIME_BUDGET_MS - (Date.now() - startTime);
+    if (timeLeftForConnections < 10000) {
+      console.log(`Skipping connections — only ${timeLeftForConnections}ms left (need ~10s)`);
+      connections = {
+        edges: existing.edges || [],
+        clusters: existing.clusters || [],
+        learning_paths: existing.learning_paths || [],
+      };
+    } else {
+      console.log(`Regenerating connections for ${allThreads.length} items (${timeLeftForConnections}ms remaining)...`);
+      try {
+        connections = await generateConnections(client, allThreads);
+      } catch (e) {
+        console.log(`Connections error: ${e.message}`);
+        connections = {
+          edges: existing.edges || [],
+          clusters: existing.clusters || [],
+          learning_paths: existing.learning_paths || [],
+        };
+      }
+    }
+
+    // 9. Assign clusters (use category as fallback instead of "General")
     const clusterLookup = {};
     for (const cluster of connections.clusters || []) {
       for (const tid of cluster.thread_ids || []) {
@@ -726,7 +725,7 @@ export default async function handler(req, res) {
       }
     }
 
-    // 8.5 Ensure every cluster name used by threads has an entry in the clusters array
+    // 9.5 Ensure every cluster name used by threads has an entry in the clusters array
     const clusterColors = ["#4e79a7", "#f28e2b", "#e15759", "#76b7b2", "#59a14f", "#edc948", "#b07aa1", "#ff9da7", "#9c755f", "#bab0ac"];
     const existingClusterNames = new Set((connections.clusters || []).map((c) => c.name));
     const missingClusters = {};
@@ -748,7 +747,7 @@ export default async function handler(req, res) {
       colorIdx++;
     }
 
-    // 9. Build final output
+    // 10. Build final output
     const output = {
       threads: allThreads,
       concepts: conceptsList,
@@ -758,7 +757,7 @@ export default async function handler(req, res) {
       quizzes,
     };
 
-    // 10. Save to Vercel Blob
+    // 11. Save to Vercel Blob
     await put(`mindmap-data/${blobKey}.json`, JSON.stringify(output), {
       contentType: "application/json",
       access: "public",
