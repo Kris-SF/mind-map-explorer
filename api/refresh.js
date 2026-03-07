@@ -400,10 +400,35 @@ export default async function handler(req, res) {
     const existing = await loadExistingData(blobKey);
     const existingThreads = existing.threads || [];
 
-    // Normalize existing categories to canonical names where possible
+    // Normalize existing categories and clusters to canonical names
+    let categoriesNormalized = 0;
     for (const t of existingThreads) {
-      const norm = normalizeCategory(t.category);
-      if (norm) t.category = norm;
+      const normCat = normalizeCategory(t.category);
+      if (normCat && normCat !== t.category) {
+        t.category = normCat;
+        categoriesNormalized++;
+      }
+      const normCluster = normalizeCategory(t.cluster);
+      if (normCluster && normCluster !== t.cluster) {
+        t.cluster = normCluster;
+        categoriesNormalized++;
+      }
+    }
+    // Also normalize cluster entries in the clusters array
+    if (existing.clusters) {
+      const mergedClusters = new Map();
+      for (const c of existing.clusters) {
+        const normName = normalizeCategory(c.name) || c.name;
+        if (mergedClusters.has(normName)) {
+          // Merge thread_ids into existing cluster
+          const existing_cluster = mergedClusters.get(normName);
+          const ids = new Set([...existing_cluster.thread_ids, ...c.thread_ids]);
+          existing_cluster.thread_ids = [...ids];
+        } else {
+          mergedClusters.set(normName, { ...c, name: normName });
+        }
+      }
+      existing.clusters = [...mergedClusters.values()];
     }
 
     // 2. Scrape for new items (batched — returns up to BATCH_LIMIT)
@@ -416,6 +441,16 @@ export default async function handler(req, res) {
     const needsEnrichment = (t) => !t.summary || !t.concepts || t.concepts.length === 0;
     const staleCount = existingThreads.filter((t) => needsEnrichment(t) || needsCategory(t)).length;
     if (newRawItems.length === 0 && staleCount === 0) {
+      // Even if no new/stale items, save back if we normalized categories
+      if (categoriesNormalized > 0) {
+        const output = { ...existing, threads: existingThreads };
+        await put(`mindmap-data/${blobKey}.json`, JSON.stringify(output), {
+          contentType: "application/json",
+          access: "public",
+          addRandomSuffix: false,
+        });
+        return res.status(200).json({ success: true, newCount: 0, message: `No new articles. Normalized ${categoriesNormalized} categories.` });
+      }
       return res.status(200).json({ success: true, newCount: 0, message: "No new articles found. All existing articles are enriched." });
     }
 
@@ -574,9 +609,15 @@ export default async function handler(req, res) {
       const fromCluster = clusterLookup[t.id];
       if (fromCluster) {
         t.cluster = fromCluster;
-      } else if (!t.cluster || t.cluster === "General") {
-        // Use category as a better fallback than "General"
-        t.cluster = t.category && t.category !== "Unknown" && t.category !== "General" ? t.category : t.cluster || "General";
+      } else {
+        // Normalize existing cluster name if it maps to a canonical category
+        const normCluster = normalizeCategory(t.cluster);
+        if (normCluster) {
+          t.cluster = normCluster;
+        } else if (!t.cluster || t.cluster === "General") {
+          // Use canonical category as fallback
+          t.cluster = t.category || t.cluster || "General";
+        }
       }
     }
 
