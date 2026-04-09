@@ -1,7 +1,8 @@
 {
   "functions": {
     "api/*.js": {
-      "includeFiles": "data/**"
+      "includeFiles": "data/*_enriched.json"
     }
   }
 }
+

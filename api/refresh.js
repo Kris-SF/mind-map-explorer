@@ -5,7 +5,10 @@ import { readFileSync } from "fs";
 import { join } from "path";
 import { CANONICAL_CATEGORIES, normalizeCategory, normalizeDataset } from "./categories.js";
 
-const VALID_DATASETS = { moontower: "moontower_enriched" };
+const VALID_DATASETS = {
+  moontower: "moontower_enriched",
+  cultishcreative: "cultishcreative_enriched",
+};
 const MODEL_NAME = "claude-haiku-4-5-20251001";
 const BATCH_LIMIT = 10; // max posts to scrape+enrich per refresh (to stay within 60s timeout)
 const ENRICHMENT_CONCURRENCY = 5; // parallel Claude calls for enrichment
@@ -148,6 +151,88 @@ async function scrapeMoontowerNew(existingUrls) {
     }
   }
   return results;
+}
+
+// ============================================================
+// Beehiiv API scraping (Cultish Creative)
+// ============================================================
+async function fetchBeehiivPublicationId(apiKey) {
+  const resp = await fetch("https://api.beehiiv.com/v2/publications", {
+    headers: { Authorization: `Bearer ${apiKey}` },
+    signal: AbortSignal.timeout(10000),
+  });
+  if (!resp.ok) throw new Error(`Beehiiv publications error: HTTP ${resp.status}`);
+  const { data } = await resp.json();
+  if (!data || data.length === 0) throw new Error("No Beehiiv publications found for this API key");
+  return data[0].id;
+}
+
+async function scrapeBeehiivNew(existingUrls) {
+  const apiKey = process.env.BEEHIIV_API_KEY;
+  if (!apiKey) throw new Error("BEEHIIV_API_KEY not set");
+
+  const pubId = await fetchBeehiivPublicationId(apiKey);
+  console.log(`Beehiiv publication ID: ${pubId}`);
+
+  const allPosts = [];
+  let page = 1;
+  const limit = 100;
+
+  while (true) {
+    const url = `https://api.beehiiv.com/v2/publications/${pubId}/posts?limit=${limit}&page=${page}&status=confirmed&expand[]=free_email_content`;
+    const resp = await fetch(url, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!resp.ok) throw new Error(`Beehiiv posts error: HTTP ${resp.status}`);
+    const body = await resp.json();
+    const posts = body.data || [];
+    allPosts.push(...posts);
+    if (posts.length < limit) break;
+    page++;
+  }
+
+  console.log(`Beehiiv: ${allPosts.length} total posts found`);
+
+  const newPosts = allPosts.filter((p) => !existingUrls.has(p.web_url));
+  console.log(`Beehiiv: ${newPosts.length} new posts`);
+
+  return newPosts.map((p) => {
+    // Strip HTML tags from email content for plain text
+    let text = "";
+    if (p.free_email_content) {
+      text = p.free_email_content.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+    }
+    return {
+      id: null,
+      title: p.title || "Untitled",
+      url: p.web_url || "",
+      category: p.subtitle || "",
+      text: text.slice(0, 8000),
+      publishedAt: p.publish_date ? new Date(p.publish_date * 1000).toISOString() : null,
+    };
+  });
+}
+
+async function enrichSingleItemFreeform(client, item) {
+  let content = (item.text || "").slice(0, 8000);
+  if (!content.trim()) content = `(No content. Title: ${item.title})`;
+
+  const prompt = `Analyze this newsletter post and return JSON (no markdown fences):
+{
+  "summary": "2-3 sentence summary of the key message",
+  "concepts": ["list", "of", "key", "concepts"],
+  "difficulty": "beginner|intermediate|advanced",
+  "category": "a short category label that best describes this content (e.g. 'Marketing & Branding', 'Creativity', 'Storytelling', 'Business Strategy', etc.)"
+}
+
+Title: ${item.title}
+
+Content:
+${content}`;
+
+  const text = await askClaude(client, prompt);
+  return JSON.parse(text);
 }
 
 // ============================================================
@@ -324,12 +409,14 @@ export default async function handler(req, res) {
     const existing = await loadExistingData(blobKey);
     const existingThreads = existing.threads || [];
 
-    // Normalize existing categories and clusters to canonical names
-    const categoriesNormalized = normalizeDataset(existing);
+    // Normalize existing categories and clusters to canonical names (Moontower only)
+    const categoriesNormalized = dataset === "moontower" ? normalizeDataset(existing) : 0;
 
     // 2. Scrape for new items (batched — returns up to BATCH_LIMIT)
     const existingUrls = new Set(existingThreads.map((t) => t.url));
-    const newRawItems = await scrapeMoontowerNew(existingUrls);
+    const newRawItems = dataset === "cultishcreative"
+      ? await scrapeBeehiivNew(existingUrls)
+      : await scrapeMoontowerNew(existingUrls);
     let totalNewAvailable = newRawItems.length;
 
     // Check if there are stale items that need re-enrichment (missing summary/concepts OR non-canonical category)
@@ -361,15 +448,20 @@ export default async function handler(req, res) {
     const startTime = Date.now();
     const enrichErrors = [];
 
+    const enrichFn = dataset === "cultishcreative" ? enrichSingleItemFreeform : enrichSingleItem;
+
     async function enrichWithFallback(item) {
       try {
-        const meta = await enrichSingleItem(client, item);
+        const meta = await enrichFn(client, item);
+        const category = dataset === "cultishcreative"
+          ? (meta.category || item.category || "General")
+          : (normalizeCategory(meta.category) || normalizeCategory(item.category) || meta.category || "Commentary & Market Analysis");
         return {
           ...item,
           summary: meta.summary || "",
           concepts: meta.concepts || [],
           difficulty: meta.difficulty || "intermediate",
-          category: normalizeCategory(meta.category) || normalizeCategory(item.category) || meta.category || "Commentary & Market Analysis",
+          category,
         };
       } catch (e) {
         const errMsg = `${item.title}: ${e.message}`.slice(0, 120);
@@ -417,7 +509,10 @@ export default async function handler(req, res) {
           if (updated.summary) patch.summary = updated.summary;
           if (updated.concepts && updated.concepts.length > 0) patch.concepts = updated.concepts;
           if (updated.difficulty) patch.difficulty = updated.difficulty;
-          if (updated.category && normalizeCategory(updated.category)) patch.category = normalizeCategory(updated.category);
+          if (updated.category) {
+            const norm = dataset === "cultishcreative" ? updated.category : normalizeCategory(updated.category);
+            if (norm) patch.category = norm;
+          }
           if (Object.keys(patch).length > 0) {
             existingThreads[i] = { ...existingThreads[i], ...patch };
             updatedCount++;
@@ -506,8 +601,8 @@ export default async function handler(req, res) {
       if (fromCluster) {
         t.cluster = fromCluster;
       } else {
-        // Normalize existing cluster name if it maps to a canonical category
-        const normCluster = normalizeCategory(t.cluster);
+        // Normalize existing cluster name if it maps to a canonical category (Moontower only)
+        const normCluster = dataset !== "cultishcreative" ? normalizeCategory(t.cluster) : null;
         if (normCluster) {
           t.cluster = normCluster;
         } else if (!t.cluster || t.cluster === "General") {

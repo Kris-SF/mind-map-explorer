@@ -263,6 +263,7 @@ svg { width: 100%; height: 100%; }
   <div id="sidebar">
     <div id="dataset-switcher">
       <button class="ds-btn active" data-dataset="moontower">moontowermeta.com</button>
+      <button class="ds-btn" data-dataset="cultishcreative">cultishcreative.com</button>
     </div>
     <div id="sidebar-header">
       <h1 id="dataset-title">moontowermeta.com</h1>
@@ -352,6 +353,12 @@ const DATASETS = {
     title: "moontowermeta.com",
     subtitle: "446 articles on options, volatility & decision-making",
   },
+  "cultishcreative": {
+    file: "/api/data?dataset=cultishcreative",
+    staticFile: "data/cultishcreative_enriched.json",
+    title: "cultishcreative.com",
+    subtitle: "Loading posts…",
+  },
 };
 
 // ============================================================
@@ -369,7 +376,9 @@ async function loadData(dataset) {
     DATA = await resp.json();
     document.getElementById("loading").classList.add("hidden");
     document.getElementById("dataset-title").textContent = info.title;
-    document.getElementById("dataset-subtitle").textContent = info.subtitle;
+    const count = (DATA.threads || []).length;
+    document.getElementById("dataset-subtitle").textContent =
+      count > 0 ? `${count} posts` : info.subtitle;
     // Reset state
     activeConcept = null;
     activePath = null;
@@ -411,6 +420,10 @@ function buildSidebar() {
 function renderThreadList() {
   const container = document.getElementById("thread-list");
   const threads = getFilteredThreads();
+  if (threads.length === 0) {
+    container.innerHTML = `<p style="color:var(--text2);padding:1rem;text-align:center">No posts yet for this dataset.</p>`;
+    return;
+  }
   container.innerHTML = threads.map(t => `
     <div class="thread-item" data-id="${t.id}">
       <h3>${t.title}</h3>
